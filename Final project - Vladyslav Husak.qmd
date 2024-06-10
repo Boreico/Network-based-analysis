@@ -1,8 +1,11 @@
 ---
 title: "network-based analysis project"
 author: "Vladyslav Husak"
-format: pdf
 editor: visual
+output: html_document
+execute:
+  echo: true      # To display code in the output
+  eval: false  
 ---
 
 ## Network-based analysis project
@@ -12,6 +15,10 @@ Author: Vladyslav Husak
 ## Data loading, normalization and prepossessing
 
 The data is loaded from recount3 database. Then raw counts are scaled (`transform_counts(my_rse)`) and then saved to .csv files (both raw and normalized).
+
+```{r, eval=TRUE}
+load('NProject.RData')
+```
 
 ```{r}
 library("recount3")
@@ -38,13 +45,16 @@ write.table(assay(my_rse, "raw_counts"), 'counts_raw.csv', sep = ',', quote = TR
 
 Creating metadata table
 
+```{r, eval=TRUE}
+library("tidyverse")
+```
+
 ```{r}
 description <- my_rse$sra.sample_attributes
 sam_id <- my_rse$external_id
 sam_titles <- my_rse$sra.sample_title
 
 meta_df <- data.frame(sam_id  = sam_id , sam_title = sam_titles, description = description)
-library("tidyverse")
 
 
 df_meta <- meta_df %>%
@@ -99,11 +109,13 @@ df_reduced_var$Group <- as.factor(df_meta$time)
 table(df_reduced_var$Group)
 ```
 
-```{r}
+```{r, eval=TRUE}
 library(caret)
 library(glmnet)
 library(doParallel)
+```
 
+```{r}
 
 cl <- makeCluster(detectCores() - 2) # Two cores for the OS
 registerDoParallel(cl)
@@ -137,19 +149,21 @@ rf_model <- train(Group ~ ., data = df_reduced_var, method = "rf",
 results <- resamples(list(LDA = lda_model, RF = rf_model,
                           Elastic_Net = elas_model))
 
-dotplot(results, main = 'Models\' evaluation on classification performance')
 
+
+```
+
+```{r, eval=TRUE}
+dotplot(results, main = 'Models\' evaluation on classification performance')
 ```
 
 ```{r}
 elas_res <- elas_model$results
 
 ordered_results <- elas_res[order(-elas_res$Accuracy),]
-
-ordered_results
 ```
 
-```{r}
+```{r, eval=TRUE}
 gr <- ordered_results %>% group_by(alpha) %>% summarise(
   Accuracy = mean(Accuracy))
 
@@ -252,7 +266,7 @@ levels(meta_des$condition)
 
 ### Using scaled counts
 
-```{r}
+```{r, eval=TRUE}
 library(DESeq2)
 library(tidyverse)
 dds500 <- DESeqDataSetFromMatrix(countData = t(final_count_matrix500),
@@ -262,11 +276,9 @@ dds500 <- DESeqDataSetFromMatrix(countData = t(final_count_matrix500),
 dds500 <- DESeq(dds500)
 
 res500 <- results(dds500)
-res500
 res_df500 <- select(data.frame(res500), c('log2FoldChange', 'pvalue'))
 
 res_df500 <- cbind(Gene.symbol = rownames(res_df500), res_df500)
-res_df500
 colnames(res_df500)[1] <- "GENE"
 colnames(res_df500)[2] <- "CHANGE"
 rownames(res_df500) <- NULL
@@ -274,7 +286,7 @@ library(pathfindR)
 RA <- run_pathfindR(res_df500, iterations=1)
 ```
 
-```{r}
+```{r, eval=TRUE}
 RA
 ```
 
@@ -285,21 +297,21 @@ RA_clu <- cluster_enriched_terms(RA)
 term_gene_graph(RA)
 ```
 
-```{r}
-res_df500[order(res_df500$pvalue),]
+```{r, eval=TRUE}
+head(res_df500[order(res_df500$pvalue),])
 ```
 
-```{r}
-res_df500[order(res_df500$CHANGE),]
+```{r, eval=TRUE}
+head(res_df500[order(res_df500$CHANGE),])
 ```
 
-```{r}
-res_df500[order(res_df500$CHANGE, decreasing = T),]
+```{r, eval=TRUE}
+head(res_df500[order(res_df500$CHANGE, decreasing = T),])
 ```
 
 ### Using raw counts
 
-```{r}
+```{r, eval=TRUE}
 dds500_raw <- DESeqDataSetFromMatrix(countData = t(final_count_matrix500_raw),
                               colData = meta_des,
                               design = ~ condition)
@@ -307,37 +319,34 @@ dds500_raw <- DESeqDataSetFromMatrix(countData = t(final_count_matrix500_raw),
 dds500_raw <- DESeq(dds500_raw)
 
 res500_raw <- results(dds500_raw)
-res500_raw
 res_df500_raw <- select(data.frame(res500_raw), c('log2FoldChange', 'pvalue'))
 
 res_df500_raw <- cbind(Gene.symbol = rownames(res_df500_raw), res_df500_raw)
-res_df500_raw
 colnames(res_df500_raw)[1] <- "GENE"
 colnames(res_df500_raw)[2] <- "CHANGE"
 rownames(res_df500_raw) <- NULL
 
 RA_raw <- run_pathfindR(res_df500_raw, iterations=1)
-RA_raw
 ```
 
-```{r}
+```{r, eval=TRUE}
 RA_clu_raw <- cluster_enriched_terms(RA_raw)
 
 
 term_gene_graph(RA_raw)
 ```
 
-```{r}
-res_df500_raw[order(res_df500_raw$pvalue),]
+```{r, eval=TRUE}
+head(res_df500_raw[order(res_df500_raw$pvalue),])
 ```
 
-```{r}
-res_df500_raw[order(res_df500_raw$CHANGE, decreasing = T),]
+```{r, eval=TRUE}
+head(res_df500_raw[order(res_df500_raw$CHANGE, decreasing = T),])
 ```
 
 ## Network-building without features selection
 
-```{r}
+```{r, eval=TRUE}
 ddsall <- DESeqDataSetFromMatrix(countData = t(df_raw_counts),
                               colData = meta_des,
                               design = ~ condition)
@@ -345,19 +354,17 @@ ddsall <- DESeqDataSetFromMatrix(countData = t(df_raw_counts),
 ddsall <- DESeq(ddsall)
 
 resall <- results(ddsall)
-resall
 res_dfall <- select(data.frame(resall), c('log2FoldChange', 'pvalue'))
 
 res_dfall <- cbind(Gene.symbol = rownames(res_dfall), res_dfall)
-res_dfall
 colnames(res_dfall)[1] <- "GENE"
 colnames(res_dfall)[2] <- "CHANGE"
 rownames(res_dfall) <- NULL
 
 ```
 
-```{r}
-res_dfall[order(res_dfall$pvalue),]
+```{r, eval=TRUE}
+head(res_dfall[order(res_dfall$pvalue),])
 ```
 
 ```{r}
@@ -368,28 +375,24 @@ gene_names_all <- getBM(attributes = c('ensembl_gene_id', 'external_gene_name'),
 ```
 
 ```{r}
-gene_names_all
-```
-
-```{r}
 resall_names = merge(res_dfall, gene_names_all, by.x = "GENE", by.y = "ensembl_gene_id", all.x = FALSE)
-
-
-resall_names[resall_names$GENE == "ENSG00000109107", ]
 ```
 
-```{r}
-resall_names[order(resall_names$pvalue),]
+```{r, eval=TRUE}
+head(resall_names[order(resall_names$pvalue),])
 ```
 
-```{r}
+```{r, eval=TRUE}
 resall_names$GENE = resall_names$external_gene_name
 resall_names$external_gene_name = NULL
-resall_names
 library(pathfindR)
 RA_all <- run_pathfindR(na.omit(resall_names), iterations=1)
 ```
 
+```{r, eval=TRUE}
+head(resall_names)
+```
+
 ```{r}
-resall_names
+save.image(file = "NProject.RData")
 ```
