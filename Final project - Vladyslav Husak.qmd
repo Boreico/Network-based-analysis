@@ -1,0 +1,395 @@
+---
+title: "network-based analysis project"
+author: "Vladyslav Husak"
+format: pdf
+editor: visual
+---
+
+## Network-based analysis project
+
+Author: Vladyslav Husak
+
+## Data loading, normalization and prepossessing
+
+The data is loaded from recount3 database. Then raw counts are scaled (`transform_counts(my_rse)`) and then saved to .csv files (both raw and normalized).
+
+```{r}
+library("recount3")
+library("recount")
+
+projects <- available_projects()
+any(grepl("SRP101294", projects$project))
+
+proj_info <- subset(
+  projects,
+  project == "SRP101294" & project_type == "data_sources"
+)
+
+my_rse <- create_rse(proj_info)
+cols_meta <- colnames(colData(my_rse))
+
+assay(my_rse, "counts") <- transform_counts(my_rse)
+
+counts_all <- assay(my_rse, "counts")
+
+write.table(counts_all, 'counts_norm.csv', sep = ',', quote = TRUE, row.names = TRUE)
+write.table(assay(my_rse, "raw_counts"), 'counts_raw.csv', sep = ',', quote = TRUE, row.names = TRUE)
+```
+
+Creating metadata table
+
+```{r}
+description <- my_rse$sra.sample_attributes
+sam_id <- my_rse$external_id
+sam_titles <- my_rse$sra.sample_title
+
+meta_df <- data.frame(sam_id  = sam_id , sam_title = sam_titles, description = description)
+library("tidyverse")
+
+
+df_meta <- meta_df %>%
+  separate(col = description, 
+           into = c("age", "gender", "source_name", "time", "tissue"), 
+           sep = "\\|",
+           remove = TRUE, 
+           convert = FALSE)
+df_meta <- df_meta %>%
+  mutate(age = as.integer(gsub("[age;]", "", age)))
+df_meta <- df_meta %>%
+  mutate(gender = (gsub("gender;;", "", gender)))
+df_meta <- df_meta %>%
+  mutate(source_name = (gsub("source_name;;", "", source_name)))
+df_meta <- df_meta %>%
+  mutate(time = (gsub("time;;", "", time)))
+df_meta <- df_meta %>%
+  mutate(tissue = (gsub("tissue;;", "", tissue)))
+
+write.table(df_meta, 'metadata.csv', sep = ',', quote = TRUE, row.names = FALSE)
+```
+
+Loading data from saved files (to omit reloading from the database)
+
+```{r}
+df_meta <- read.csv("metadata.csv")
+counts_all <- read.csv("counts_norm.csv")
+counts_raw <- read.csv("counts_raw.csv")
+df_norm_counts <- data.frame(t(counts_all))
+```
+
+```{r}
+df_raw_counts <- data.frame(t(counts_raw))
+```
+
+## Influential genes selection with classification models
+
+Firstly, to reduce the number of parameters to be feasible for models with minimal loss of important variance, the variance threshold was set.
+
+```{r}
+variance_threshold <- 50000
+# Calculate variance for each column
+variances <- apply(df_norm_counts, 2, var)
+# Filter columns to remove those with variance below the threshold
+df_reduced_var <- df_norm_counts[, variances > variance_threshold]
+dim(df_reduced_var)
+
+df_reduced_var$Group <- as.factor(df_meta$time)
+```
+
+```{r}
+table(df_reduced_var$Group)
+```
+
+```{r}
+library(caret)
+library(glmnet)
+library(doParallel)
+
+
+cl <- makeCluster(detectCores() - 2) # Two cores for the OS
+registerDoParallel(cl)
+
+set.seed(123)  # For reproducibility
+train_control <- trainControl(
+  method = "cv",  # Cross-validation
+  number = 10,    # Number of folds
+  savePredictions = "final",
+  classProbs = TRUE,
+  allowParallel = TRUE# If you need probability scores for ROC, etc.
+)
+
+levels(df_reduced_var$Group) <- make.names(levels(df_reduced_var$Group), unique = TRUE)
+
+lda_model <- train(Group ~ ., data = df_reduced_var, method = "lda",
+                   trControl = train_control)
+
+
+elas_model <- train(Group ~ ., data = df_reduced_var, method = "glmnet",
+                     trControl = train_control,
+                     tuneLength = 10,  # Search over 10 values of lambda
+                     family = "binomial")  # Assuming binary classification
+
+rf_model <- train(Group ~ ., data = df_reduced_var, method = "rf",
+                  trControl = train_control,
+                  ntree = 100)  # Number of trees
+
+
+
+results <- resamples(list(LDA = lda_model, RF = rf_model,
+                          Elastic_Net = elas_model))
+
+dotplot(results, main = 'Models\' evaluation on classification performance')
+
+```
+
+```{r}
+elas_res <- elas_model$results
+
+ordered_results <- elas_res[order(-elas_res$Accuracy),]
+
+ordered_results
+```
+
+```{r}
+gr <- ordered_results %>% group_by(alpha) %>% summarise(
+  Accuracy = mean(Accuracy))
+
+plot(y=gr$Accuracy, x=gr$alpha, main = 'Elastic Net grid search', xlab = 'Alpha', ylab = 'Accuracy')
+```
+
+Training the model of the whole data set to select the most influential parameters
+
+```{r}
+set.seed(1)
+x <- subset(df_reduced_var, select = -Group)
+
+trainIndex <- createDataPartition(df_reduced_var$Group, p = .7, list = FALSE, times = 1)
+# Create training and testing sets
+train_data <- df_reduced_var[trainIndex, ]
+test_data <- df_reduced_var[-trainIndex, ]
+x_train <- subset(train_data, select = -Group)
+x_test <- subset(test_data, select = -Group)
+
+cv_elas <- cv.glmnet(sapply(x_train, as.double), train_data$Group, alpha = 0.1, family='binomial')
+
+best_lambda <- cv_elas$lambda.min
+
+validation_model <- glmnet(sapply(x_train, as.double), train_data$Group, 
+                      alpha = 0.1, family = 'binomial', lambda = best_lambda)
+
+predictions <- predict(validation_model, newx = sapply(x_test, as.double), type = "class")
+
+actual_outcomes <- test_data$Group
+
+# Calculate accuracy
+accuracy <- mean(predictions == actual_outcomes)
+print(accuracy)
+
+final_model <- glmnet(sapply(x, as.double), df_reduced_var$Group, 
+                      alpha = 0.1, family = 'binomial', lambda = best_lambda)
+
+
+```
+
+```{r}
+library(vip)
+
+importance_data <- vi(final_model, lambda = best_lambda)
+
+top_500_features <- head(importance_data[order(-importance_data$Importance), ], 500)
+
+
+top_500_features$base_ids <- gsub("\\..*", "", top_500_features$Variable)
+library(biomaRt)
+
+ensembl <- useMart("ensembl", dataset = "hsapiens_gene_ensembl")
+
+gene_names500 <- getBM(attributes = c('ensembl_gene_id', 'external_gene_name'),
+                    filters = 'ensembl_gene_id',
+                    values = top_500_features$base_ids,
+                    mart = ensembl)
+
+# Create a data frame from the fetched results
+gene_names_df500 <- data.frame(ensembl_gene_id = gene_names500$ensembl_gene_id,
+                            gene_name = gene_names500$external_gene_name,
+                            stringsAsFactors = FALSE)
+
+# Merge the fetched gene names with the top_500_features dataframe
+top_500_features <- merge(top_500_features, gene_names_df500, by.x = "base_ids", by.y = "ensembl_gene_id", all.x = TRUE)
+
+top_500_features_clean <- top_500_features[!(top_500_features$gene_name %in% ""),]
+
+top_features <- na.omit(top_500_features_clean)
+
+colnames(df_raw_counts) <- gsub("\\..*", "", colnames(df_raw_counts))
+
+colnames(df_reduced_var) <- gsub("\\..*", "", colnames(df_reduced_var))
+
+top_genes_ids <- as.vector(top_features$base_ids)
+
+final_count_matrix500_raw <- df_raw_counts[, colnames(df_raw_counts) %in% top_genes_ids]
+
+final_count_matrix500 <- df_reduced_var[, colnames(df_reduced_var) %in% top_genes_ids]
+
+mapping_df_ordered500_raw <- top_features[match(colnames(final_count_matrix500_raw), top_features$base_ids), ]
+
+mapping_df_ordered500 <- top_features[match(colnames(final_count_matrix500), top_features$base_ids), ]
+
+colnames(final_count_matrix500_raw) <- mapping_df_ordered500_raw$gene_name
+
+colnames(final_count_matrix500) <- mapping_df_ordered500$gene_name
+```
+
+## Differential expression and gene enrichment
+
+```{r}
+# preparing metadate for DE analysis
+keep <- c("sam_id", "time")
+meta_des <- df_meta[, keep, drop=F]
+colnames(meta_des)[2] <- "condition"
+meta_des$condition <- as.factor(meta_des$condition)
+levels(meta_des$condition)
+```
+
+### Using scaled counts
+
+```{r}
+library(DESeq2)
+library(tidyverse)
+dds500 <- DESeqDataSetFromMatrix(countData = t(final_count_matrix500),
+                              colData = meta_des,
+                              design = ~ condition)
+
+dds500 <- DESeq(dds500)
+
+res500 <- results(dds500)
+res500
+res_df500 <- select(data.frame(res500), c('log2FoldChange', 'pvalue'))
+
+res_df500 <- cbind(Gene.symbol = rownames(res_df500), res_df500)
+res_df500
+colnames(res_df500)[1] <- "GENE"
+colnames(res_df500)[2] <- "CHANGE"
+rownames(res_df500) <- NULL
+library(pathfindR)
+RA <- run_pathfindR(res_df500, iterations=1)
+```
+
+```{r}
+RA
+```
+
+```{r}
+RA_clu <- cluster_enriched_terms(RA)
+
+
+term_gene_graph(RA)
+```
+
+```{r}
+res_df500[order(res_df500$pvalue),]
+```
+
+```{r}
+res_df500[order(res_df500$CHANGE),]
+```
+
+```{r}
+res_df500[order(res_df500$CHANGE, decreasing = T),]
+```
+
+### Using raw counts
+
+```{r}
+dds500_raw <- DESeqDataSetFromMatrix(countData = t(final_count_matrix500_raw),
+                              colData = meta_des,
+                              design = ~ condition)
+
+dds500_raw <- DESeq(dds500_raw)
+
+res500_raw <- results(dds500_raw)
+res500_raw
+res_df500_raw <- select(data.frame(res500_raw), c('log2FoldChange', 'pvalue'))
+
+res_df500_raw <- cbind(Gene.symbol = rownames(res_df500_raw), res_df500_raw)
+res_df500_raw
+colnames(res_df500_raw)[1] <- "GENE"
+colnames(res_df500_raw)[2] <- "CHANGE"
+rownames(res_df500_raw) <- NULL
+
+RA_raw <- run_pathfindR(res_df500_raw, iterations=1)
+RA_raw
+```
+
+```{r}
+RA_clu_raw <- cluster_enriched_terms(RA_raw)
+
+
+term_gene_graph(RA_raw)
+```
+
+```{r}
+res_df500_raw[order(res_df500_raw$pvalue),]
+```
+
+```{r}
+res_df500_raw[order(res_df500_raw$CHANGE, decreasing = T),]
+```
+
+## Network-building without features selection
+
+```{r}
+ddsall <- DESeqDataSetFromMatrix(countData = t(df_raw_counts),
+                              colData = meta_des,
+                              design = ~ condition)
+
+ddsall <- DESeq(ddsall)
+
+resall <- results(ddsall)
+resall
+res_dfall <- select(data.frame(resall), c('log2FoldChange', 'pvalue'))
+
+res_dfall <- cbind(Gene.symbol = rownames(res_dfall), res_dfall)
+res_dfall
+colnames(res_dfall)[1] <- "GENE"
+colnames(res_dfall)[2] <- "CHANGE"
+rownames(res_dfall) <- NULL
+
+```
+
+```{r}
+res_dfall[order(res_dfall$pvalue),]
+```
+
+```{r}
+gene_names_all <- getBM(attributes = c('ensembl_gene_id', 'external_gene_name'),
+                    filters = 'ensembl_gene_id',
+                    values = res_dfall$GENE,
+                    mart = ensembl)
+```
+
+```{r}
+gene_names_all
+```
+
+```{r}
+resall_names = merge(res_dfall, gene_names_all, by.x = "GENE", by.y = "ensembl_gene_id", all.x = FALSE)
+
+
+resall_names[resall_names$GENE == "ENSG00000109107", ]
+```
+
+```{r}
+resall_names[order(resall_names$pvalue),]
+```
+
+```{r}
+resall_names$GENE = resall_names$external_gene_name
+resall_names$external_gene_name = NULL
+resall_names
+library(pathfindR)
+RA_all <- run_pathfindR(na.omit(resall_names), iterations=1)
+```
+
+```{r}
+resall_names
+```
